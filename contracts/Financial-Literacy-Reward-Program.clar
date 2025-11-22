@@ -29,6 +29,7 @@
 (define-constant min-stake-amount u1000000)
 (define-constant stake-lock-period u144)
 (define-constant annual-yield-rate u5)
+(define-constant referral-bonus-rate u10)
 
 (define-data-var token-total-supply uint u0)
 (define-data-var next-module-id uint u1)
@@ -53,6 +54,7 @@
 (define-map user-completions {user: principal, module-id: uint} bool)
 (define-map user-total-rewards principal uint)
 (define-map user-modules-completed principal uint)
+(define-map user-referrer principal principal)
 
 (define-map proposals uint {
   proposer: principal,
@@ -199,6 +201,7 @@
     (completion-key {user: tx-sender, module-id: module-id})
     (user-rewards (default-to u0 (map-get? user-total-rewards tx-sender)))
     (user-completed-count (default-to u0 (map-get? user-modules-completed tx-sender)))
+    (referrer-opt (map-get? user-referrer tx-sender))
   )
     (asserts! (not (var-get is-paused)) err-paused)
     (asserts! (get is-active module) err-module-inactive)
@@ -210,9 +213,37 @@
       total-completions: (+ (get total-completions module) u1)
     }))
     (try! (mint-tokens tx-sender reward-amount))
+    (match referrer-opt
+      referrer
+        (let (
+          (referrer-bonus (/ (* reward-amount referral-bonus-rate) u100))
+        )
+          (if (> referrer-bonus u0)
+            (try! (mint-tokens referrer referrer-bonus))
+            true
+          )
+        )
+      true
+    )
     (print {action: "complete-module", user: tx-sender, module-id: module-id, reward: reward-amount})
     (ok reward-amount)
   )
+)
+
+(define-public (set-referrer (referrer principal))
+  (let (
+    (existing (map-get? user-referrer tx-sender))
+  )
+    (asserts! (is-none existing) err-owner-only)
+    (asserts! (not (is-eq referrer tx-sender)) err-owner-only)
+    (map-set user-referrer tx-sender referrer)
+    (print {action: "set-referrer", user: tx-sender, referrer: referrer})
+    (ok true)
+  )
+)
+
+(define-read-only (get-referrer (user principal))
+  (map-get? user-referrer user)
 )
 
 (define-public (create-proposal (title (string-ascii 128)) (description (string-ascii 512)) (action-type (string-ascii 32)) (target-module-id (optional uint)) (new-reward-amount (optional uint)) (new-title (optional (string-ascii 64))) (new-description (optional (string-ascii 256))))
