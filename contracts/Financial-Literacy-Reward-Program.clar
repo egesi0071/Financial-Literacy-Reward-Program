@@ -16,6 +16,8 @@
 (define-constant err-insufficient-stake (err u114))
 (define-constant err-no-stake-found (err u115))
 (define-constant err-stake-locked (err u116))
+(define-constant err-streak-already-claimed (err u117))
+(define-constant err-streak-expired (err u118))
 
 (define-constant token-name "FinLit Token")
 (define-constant token-symbol "FLT")
@@ -30,6 +32,9 @@
 (define-constant stake-lock-period u144)
 (define-constant annual-yield-rate u5)
 (define-constant referral-bonus-rate u10)
+(define-constant streak-base-reward u100000)
+(define-constant streak-multiplier u10)
+(define-constant streak-window u144)
 
 (define-data-var token-total-supply uint u0)
 (define-data-var next-module-id uint u1)
@@ -84,6 +89,13 @@
 })
 
 (define-map user-stakes principal (list 50 uint))
+
+(define-map user-streaks principal {
+  current-streak: uint,
+  last-claim-height: uint,
+  longest-streak: uint,
+  total-streak-rewards: uint
+})
 
 (define-public (transfer (amount uint) (from principal) (to principal) (memo (optional (buff 34))))
   (begin
@@ -485,6 +497,76 @@
     annual-rate: annual-yield-rate,
     lock-period: stake-lock-period
   })
+)
+
+(define-public (claim-daily-streak)
+  (let (
+    (current-height stacks-block-height)
+    (user-streak-data (default-to {
+      current-streak: u0,
+      last-claim-height: u0,
+      longest-streak: u0,
+      total-streak-rewards: u0
+    } (map-get? user-streaks tx-sender)))
+    (last-claim (get last-claim-height user-streak-data))
+    (current-streak (get current-streak user-streak-data))
+    (longest-streak (get longest-streak user-streak-data))
+    (total-rewards (get total-streak-rewards user-streak-data))
+    (blocks-since-last (- current-height last-claim))
+    (is-first-claim (is-eq last-claim u0))
+    (is-within-window (and (> blocks-since-last u0) (<= blocks-since-last (* u2 streak-window))))
+    (is-new-day (> blocks-since-last streak-window))
+  )
+    (asserts! (not (var-get is-paused)) err-paused)
+    (asserts! (or is-first-claim is-new-day) err-streak-already-claimed)
+    (let (
+      (new-streak (if (or is-first-claim is-within-window)
+        (+ current-streak u1)
+        u1
+      ))
+      (streak-reward (+ streak-base-reward (* streak-base-reward (* (- new-streak u1) streak-multiplier) (/ u1 u100))))
+      (new-longest (if (> new-streak longest-streak) new-streak longest-streak))
+    )
+      (map-set user-streaks tx-sender {
+        current-streak: new-streak,
+        last-claim-height: current-height,
+        longest-streak: new-longest,
+        total-streak-rewards: (+ total-rewards streak-reward)
+      })
+      (try! (mint-tokens tx-sender streak-reward))
+      (print {action: "claim-streak", user: tx-sender, streak: new-streak, reward: streak-reward})
+      (ok {streak: new-streak, reward: streak-reward})
+    )
+  )
+)
+
+(define-read-only (get-user-streak (user principal))
+  (default-to {
+    current-streak: u0,
+    last-claim-height: u0,
+    longest-streak: u0,
+    total-streak-rewards: u0
+  } (map-get? user-streaks user))
+)
+
+(define-read-only (get-streak-status (user principal))
+  (let (
+    (user-streak-data (get-user-streak user))
+    (last-claim (get last-claim-height user-streak-data))
+    (current-height stacks-block-height)
+    (blocks-since-last (if (is-eq last-claim u0) u0 (- current-height last-claim)))
+    (can-claim (or (is-eq last-claim u0) (> blocks-since-last streak-window)))
+    (streak-alive (or (is-eq last-claim u0) (<= blocks-since-last (* u2 streak-window))))
+  )
+    {
+      current-streak: (get current-streak user-streak-data),
+      longest-streak: (get longest-streak user-streak-data),
+      total-rewards: (get total-streak-rewards user-streak-data),
+      can-claim-now: can-claim,
+      streak-alive: streak-alive,
+      blocks-until-claim: (if can-claim u0 (- streak-window blocks-since-last))
+    }
+  )
 )
 
 (mint-tokens contract-owner u10000000000)
