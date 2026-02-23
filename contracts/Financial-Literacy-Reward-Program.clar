@@ -18,6 +18,9 @@
 (define-constant err-stake-locked (err u116))
 (define-constant err-streak-already-claimed (err u117))
 (define-constant err-streak-expired (err u118))
+(define-constant err-achievement-already-claimed (err u119))
+(define-constant err-achievement-not-found (err u120))
+(define-constant err-requirements-not-met (err u121))
 
 (define-constant token-name "FinLit Token")
 (define-constant token-symbol "FLT")
@@ -43,6 +46,7 @@
 (define-data-var admin principal contract-owner)
 (define-data-var total-staked uint u0)
 (define-data-var next-stake-id uint u1)
+(define-data-var next-achievement-id uint u1)
 
 (define-map token-balances principal uint)
 (define-map token-supplies-approved {owner: principal, spender: principal} uint)
@@ -95,6 +99,18 @@
   last-claim-height: uint,
   longest-streak: uint,
   total-streak-rewards: uint
+})
+
+(define-map achievements uint {
+  name: (string-ascii 64),
+  description: (string-ascii 256),
+  required-modules: uint,
+  reward-amount: uint,
+  total-claims: uint
+})
+
+(define-map user-achievements {user: principal, achievement-id: uint} {
+  claimed-at: uint
 })
 
 (define-public (transfer (amount uint) (from principal) (to principal) (memo (optional (buff 34))))
@@ -567,6 +583,60 @@
       blocks-until-claim: (if can-claim u0 (- streak-window blocks-since-last))
     }
   )
+)
+
+(define-public (create-achievement (name (string-ascii 64)) (description (string-ascii 256)) (required-modules uint) (reward-amount uint))
+  (let (
+    (achievement-id (var-get next-achievement-id))
+  )
+    (asserts! (is-eq tx-sender (var-get admin)) err-not-admin)
+    (asserts! (not (var-get is-paused)) err-paused)
+    (asserts! (> reward-amount u0) err-invalid-amount)
+    (asserts! (> required-modules u0) err-invalid-amount)
+    (map-set achievements achievement-id {
+      name: name,
+      description: description,
+      required-modules: required-modules,
+      reward-amount: reward-amount,
+      total-claims: u0
+    })
+    (var-set next-achievement-id (+ achievement-id u1))
+    (print {action: "create-achievement", achievement-id: achievement-id, name: name})
+    (ok achievement-id)
+  )
+)
+
+(define-public (claim-achievement (achievement-id uint))
+  (let (
+    (achievement (unwrap! (map-get? achievements achievement-id) err-achievement-not-found))
+    (user-completed (default-to u0 (map-get? user-modules-completed tx-sender)))
+    (claim-key {user: tx-sender, achievement-id: achievement-id})
+  )
+    (asserts! (not (var-get is-paused)) err-paused)
+    (asserts! (is-none (map-get? user-achievements claim-key)) err-achievement-already-claimed)
+    (asserts! (>= user-completed (get required-modules achievement)) err-requirements-not-met)
+    (map-set user-achievements claim-key {
+      claimed-at: stacks-block-height
+    })
+    (map-set achievements achievement-id (merge achievement {
+      total-claims: (+ (get total-claims achievement) u1)
+    }))
+    (try! (mint-tokens tx-sender (get reward-amount achievement)))
+    (print {action: "claim-achievement", user: tx-sender, achievement-id: achievement-id, reward: (get reward-amount achievement)})
+    (ok (get reward-amount achievement))
+  )
+)
+
+(define-read-only (get-achievement (achievement-id uint))
+  (map-get? achievements achievement-id)
+)
+
+(define-read-only (get-user-achievement (user principal) (achievement-id uint))
+  (map-get? user-achievements {user: user, achievement-id: achievement-id})
+)
+
+(define-read-only (has-achievement (user principal) (achievement-id uint))
+  (is-some (map-get? user-achievements {user: user, achievement-id: achievement-id}))
 )
 
 (mint-tokens contract-owner u10000000000)
